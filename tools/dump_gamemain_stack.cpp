@@ -29,17 +29,22 @@ int main(int argc, char* argv[]) {
     HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!hProcess) return 1;
 
-    uint64_t eboot_base = 0;
+    uint64_t eboot_base = 0x5320000;
+    uint64_t eboot_size = 0x2800000;
     uint64_t cur_addr = 0;
     MEMORY_BASIC_INFORMATION mbi;
     while (VirtualQueryEx(hProcess, (void*)cur_addr, &mbi, sizeof(mbi))) {
-        if (mbi.RegionSize == 0xb30000 && (mbi.Protect == PAGE_EXECUTE_READ || mbi.Protect == PAGE_EXECUTE_READWRITE)) {
-            eboot_base = (uint64_t)mbi.BaseAddress;
-            break;
+        if (mbi.RegionSize >= 0x1000000 && (mbi.Protect == PAGE_EXECUTE_READ || mbi.Protect == PAGE_EXECUTE_READWRITE)) {
+            if ((uint64_t)mbi.BaseAddress >= 0x1000000 && (uint64_t)mbi.BaseAddress < 0x20000000) {
+                eboot_base = (uint64_t)mbi.BaseAddress;
+                eboot_size = mbi.RegionSize;
+                break;
+            }
         }
         cur_addr = (uint64_t)mbi.BaseAddress + mbi.RegionSize;
         if (cur_addr == 0) break;
     }
+    std::cout << "EBOOT Base: 0x" << std::hex << eboot_base << " Size: 0x" << eboot_size << "\n";
 
     HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
     pfnGetThreadDescription GetThreadDesc = (pfnGetThreadDescription)GetProcAddress(hKernel32, "GetThreadDescription");
@@ -59,16 +64,15 @@ int main(int argc, char* argv[]) {
                             LocalFree(desc);
                         }
                     }
-                    if (name == L"Game:Main") {
+                    if (name.find(L"Game:") != std::wstring::npos || name.find(L"ig") != std::wstring::npos || name.empty()) {
                         SuspendThread(hThread);
                         CONTEXT ctx = {0}; ctx.ContextFlags = CONTEXT_ALL;
                         GetThreadContext(hThread, &ctx);
-                        std::wcout << L"Found Game:Main (TID " << te.th32ThreadID << L") RIP=0x" 
-                                   << std::hex << ctx.Rip << L" RSP=0x" << ctx.Rsp << L"\n";
-                        if (eboot_base && ctx.Rip >= eboot_base && ctx.Rip < eboot_base + 0xb2d7a8) {
+                        if (ctx.Rip >= eboot_base && ctx.Rip < eboot_base + eboot_size) {
+                            std::wcout << L"Thread [" << (name.empty() ? L"(unnamed)" : name) << L"] (TID " << te.th32ThreadID << L") RIP=0x" 
+                                       << std::hex << ctx.Rip << L" RSP=0x" << ctx.Rsp << L"\n";
                             uint64_t rip_vaddr = ctx.Rip - eboot_base;
-                            std::cout << "  RIP is in EBOOT: vaddr 0x" << std::hex << rip_vaddr 
-                                      << " (file 0x" << (rip_vaddr + 0x4000) << ")\n";
+                            std::cout << "  RIP in EBOOT: vaddr 0x" << std::hex << rip_vaddr << "\n";
                         } else {
                             MEMORY_BASIC_INFORMATION rip_mbi;
                             if (VirtualQueryEx(hProcess, (void*)ctx.Rip, &rip_mbi, sizeof(rip_mbi))) {
@@ -93,20 +97,19 @@ int main(int argc, char* argv[]) {
                         std::cout << "Valid CALL Return Addresses on Stack:\n";
                         for (size_t i = 0; i < br / 8; i++) {
                             uint64_t val = stack[i];
-                            if (eboot_base && val >= eboot_base && val < eboot_base + 0xb2d7a8) {
+                            if (eboot_base && val >= eboot_base && val < eboot_base + eboot_size) {
                                 if (is_call(hProcess, val)) {
                                     uint64_t vaddr = val - eboot_base;
-                                    uint64_t file_off = vaddr + 0x4000;
                                     std::cout << "  [+0x" << std::hex << (i*8) << "] RET: eboot+0x" 
-                                              << vaddr << " (file 0x" << file_off << ")\n";
+                                              << vaddr << "\n";
                                 }
                             }
                         }
                         ResumeThread(hThread);
                         CloseHandle(hThread);
-                        break;
+                    } else {
+                        CloseHandle(hThread);
                     }
-                    CloseHandle(hThread);
                 }
             }
         } while (Thread32Next(hSnap, &te));

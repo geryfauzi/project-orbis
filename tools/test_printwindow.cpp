@@ -44,7 +44,7 @@ BOOL CALLBACK EnumWindowsProc(HWND hwnd, LPARAM lParam) {
     if (pid == (DWORD)lParam) {
         char title[256] = {0};
         GetWindowTextA(hwnd, title, 255);
-        if (strlen(title) > 0 && IsWindowVisible(hwnd) && strstr(title, "Beach Buggy")) {
+        if (IsWindowVisible(hwnd)) {
             RECT rc;
             GetClientRect(hwnd, &rc);
             POINT pt = {0, 0};

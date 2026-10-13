@@ -1,7 +1,7 @@
 # Project Orbis: PS4 to PC Native Conversion Knowledge Base
 
-> **Target Audience:** AI Coding Assistants, Reverse Engineers, and Systems Programmers.
-> **Scope:** Architecture, methodology, debugging protocols, and binary patching strategies for running Sony PlayStation 4 (Orbis OS) software natively on Windows x86-64.
+> **Target Audience:** AI Coding Assistants, Reverse Engineers, and Systems Programmers.  
+> **Scope:** Architecture, methodology, debugging protocols, binary patching strategies, and runtime packaging for running Sony PlayStation 4 (Orbis OS) software on Windows x86-64.
 
 ---
 
@@ -9,167 +9,157 @@
 
 ### 1.1 The x86-64 Native Execution Paradigm
 Traditional console emulation (e.g., PS3 Cell, PS2 Emotion Engine) requires heavy CPU interpreters or dynamic binary recompilation (JIT). 
-The PlayStation 4, however, runs on an **AMD Jaguar x86-64** processor. Host PC hardware (Intel Core / AMD Ryzen) also utilizes the **x86-64** architecture.
+The PlayStation 4 runs on an **AMD Jaguar x86-64** processor. Host PC hardware (Intel Core / AMD Ryzen) also utilizes the **x86-64** architecture.
 
 Therefore:
-* **Zero CPU Emulation:** Game machine code (`eboot.bin`) is executed directly by the host CPU.
-* **Compatibility Layer (Proton / Wine Model):** The runtime's only responsibility is translating platform-specific services:
+* **Zero CPU Emulation:** Game machine code (`eboot.bin`) is executed directly by the host CPU without an interpreter or JIT recompiler.
+* **Compatibility / Translation Layer (Proton / Wine Model):** Just as Valve's Proton runs Windows games on Linux by translating Win32 calls and DirectX to Vulkan, the PS4 runtime's responsibility is translating platform-specific services:
   1. **OS Calls:** Orbis OS (FreeBSD-based) kernel syscalls $\rightarrow$ Windows Win32 API.
   2. **Graphics:** Sony GNM / GNMX low-level AMD GCN command packets (PM4) $\rightarrow$ Vulkan 1.3.
   3. **Audio:** Sony audio pipelines & PRX modules $\rightarrow$ OpenAL / SDL2.
 
----
-
-## 2. Case Study: The Breakthrough in Beach Buggy Racing 2
-
-### 2.1 The Problem: The "Blue Canvas" Trap
-* **Symptom:** The game booted, initialized a window, and produced audio, but the display remained frozen on a solid blue clear color (`#194882`). No 3D models, UI, or text ever rendered.
-* **Initial False Hypothesis:** A Vulkan GPU shader bug or broken PM4 command buffer submission.
-* **Actual Root Cause Discovered via Memory & Disassembly Analysis:**
-  * Engine: Vector Unit in-house engine (`VuEngine`).
-  * Function: Engine initialization routine at `0x9ea0` - `0xd035` in `eboot.bin`.
-  * The engine sequentially initializes 84 distinct subsystems (leaderboards, telemetry, PSN matchmaking, party voice, online storage, etc.).
-  * On PC, unhandled or mocked Sony services return `0` (`false`).
-  * In the game binary, **every single failure check contained a conditional jump (`0F 84 disp32` / `JE 0xd035`) directly to the cleanup/teardown sequence**.
-  * When any subsystem failed, the engine jumped to `0xd035`, destroyed initialized subsystems, set the 3D graphics manager pointer (`VuGfx`) to `NULL` (`0x0`), and aborted creation of the rendering pipeline.
-
-### 2.2 The Solution: NOPing the Abort Jumps
-By creating an automated patcher (`tools/patch_subsystem_jumps.cpp`), all 84 conditional failure jumps (`0F 84 ?? ?? ?? ??`) targeting `0xd035` were overwritten with 6-byte `NOP` sequences (`0x90 0x90 0x90 0x90 0x90 0x90`).
-* **Result:** The engine gracefully ignored failed console-specific online/hardware subsystems, continued initialization, created `VuGfx`, compiled Vulkan shaders, and entered full 3D racing at locked 60 FPS.
-
-### 2.3 Audio SFX Restoration: LFE Stereo Folding
-* **Symptom:** Background music was loud, but in-game sound effects (explosions, boosts, crashes) were barely audible.
-* **Root Cause:** PS4 outputs an 8-channel (7.1 surround) sound stream. Heavy SFX and explosions are routed to the **LFE (Low Frequency Effects / Subwoofer)** channel. On standard 2-channel PC stereo setups, SDL2 dropped the unmapped LFE channel.
-* **Fix:** Changing the audio backend in `%APPDATA%\shadps4\config.json` to OpenAL (`"audio_backend": 1`). OpenAL performs active downmixing by folding the LFE channel into the front stereo channels with appropriate gain scaling.
+### 1.2 Architecture Division of Project Orbis
+* **Runtime Layer (`runtime/shadPS4.exe`):** Production-grade translation layer handling Vulkan GPU command processing, swapchain presentation, memory paging, and audio routing.
+* **Toolkit & RE Layer (`tools/`, `pkgextract_tool/`):** Custom diagnostics (`dump_gamemain_stack`, `read_live_globals`), automated binary patchers (`patch_subsystem_jumps`), PKG extractors, and build tools.
+* **Launcher Layer (`templates/launcher.cpp`):** Standalone Win32 GUI wrappers compiled with portable GCC to distribute games cleanly without terminal windows.
+* **Experimental Lab (`/src`):** An educational, low-level prototype exploring custom ELF64 segment loaders, NID symbol resolution, and SYSV ABI invocation directly on Win32. *(Note: Not used for full 3D graphics playback, as full GNM PM4 $\rightarrow$ Vulkan translation requires the complete runtime).*
 
 ---
 
-## 3. The Orbis Protocol: Step-by-Step Conversion Methodology for Any PS4 Game
+## 2. Real-World Case Studies
 
-When approaching a new PS4 title, follow this exact sequence:
+### 2.1 Case Study 1: Beach Buggy Racing 2 (Vector Unit Engine)
+* **Engine:** In-house `VuEngine`.
+* **The "Blue Canvas" Trap:**
+  * Game booted, created a window, and played audio, but rendered only a solid blue clear color (`#194882`).
+  * Disassembly of engine initialization (`0x9ea0` - `0xd035`) revealed sequential checks for 84 console-specific subsystems (telemetry, PSN matchmaking, party voice, online storage).
+  * Every failed check branched via conditional jump (`0F 84 disp32` / `JE 0xd035`) straight to the engine teardown sequence, setting `VuGfx` to `NULL` and aborting 3D pipeline creation.
+* **The Fix:**
+  * Created `tools/patch_subsystem_jumps.cpp` to overwrite all 84 failure jumps with 6-byte NOP sequences (`0x90 0x90 0x90 0x90 0x90 0x90`).
+  * Result: Engine ignored unmocked online services and successfully entered 60 FPS 3D racing.
+* **Audio SFX Restoration:**
+  * PS4 8-channel (7.1) audio routes explosions and heavy SFX to the **LFE (Subwoofer)** channel.
+  * Standard stereo dropped the LFE channel under SDL2.
+  * Setting `"audio_backend": 1` (OpenAL) in `%APPDATA%\shadps4\config.json` enabled active stereo folding (downmixing LFE into front left/right channels).
+
+### 2.2 Case Study 2: Crash Team Racing Nitro-Fueled (Beenox IG Engine)
+* **Title ID:** `CUSA13795` (v1.21).
+* **Engine:** Beenox Internal Graphics Engine (`chunks.igx`, `.pak`, `.bk2`, `.igz`).
+* **Trap A: Multi-Part Update Overwrite Loss:**
+  * `pkgextract.exe -f` wipes the target directory when extracting.
+  * Extracting an 8.5 GB Update PKG over an existing 13.5 GB Base Game directory with `-f` deleted base assets, causing immediate `0xC0000005` crash due to missing `loosefiles.pak` and `localizationData.igz`.
+  * **Solution:** Extract Base Game into `game_base`, extract Update into `game_update`, then perform a non-destructive file overlay merge into the final game folder.
+* **Trap B: Missing System PRX Libraries:**
+  * The game engine dynamically loads `/app0/sce_module/libc.prx` and `/app0/sce_module/libSceFios2.prx`.
+  * Without these PRX modules present in `sce_module/`, the game aborts at startup with `Assertion Failed! libc.prx cannot be loaded`.
+  * **Solution:** Ensure `sce_module/` is populated with decrypted system PRXs (`libc.prx`, `libSceFios2.prx`, `libSceNpToolkit2.prx`).
+* **Trap C: Shader Pipeline Stuttering on New Actions:**
+  * **Symptom:** Smooth framerate interrupted by sudden micro-stutters when triggering new actions for the first time (e.g., pressing R2 to look back, emitting nitro flames, entering new track zones).
+  * **Root Cause:** Real-time Vulkan Shader Compilation. The GPU driver compiles console SPIR-V/GCN shaders into host GPU machine code on-the-fly.
+  * **Solution:**
+    * In `%APPDATA%\shadps4\config.json`, enable:
+      ```json
+      "Vulkan": {
+          "pipeline_cache_enabled": true,
+          "pipeline_cache_archived": true,
+          "vkvalidation_core_enabled": false
+      }
+      ```
+    * Pipelines are cached persistently in `%APPDATA%\shadps4\cache\CUSA13795*.bin`. Once cached, all subsequent races run completely stutter-free.
+
+---
+
+## 3. The Orbis Protocol: Standard Conversion Workflow
 
 ```
-[1. Unpack PKG] ──> [2. Sanity Check ELF] ──> [3. Baseline Run] 
-                                                      │
-                       ┌──────────────────────────────┴──────────────────────────────┐
-                       ▼                                                             ▼
-              [Clean Boot / In-game]                                        [Failure / Freeze]
-                       │                                                             │
-                       │                                                    [4. Triage Failure Mode]
-                       │                                                             │
-                       │                                      ┌──────────────────────┼──────────────────────┐
-                       │                                      ▼                      ▼                      ▼
-                       │                               [Crash (0xC0000005)]    [Loop / Freeze]       [Empty Canvas]
-                       │                                      │                      │                      │
-                       │                               [Fix NID / Stub]     [Dump Thread Stack]    [Subsystem Bypass]
-                       │                                      │                      │                      │
-                       └──────────────────────────────────────┴──────────────────────┴──────────────────────┘
-                                                              │
-                                                     [5. Audio / Input Tuning]
-                                                              │
-                                                     [6. Native Launcher Packaging]
+[1. Unpack PKG (Base + Update Merge)] ──> [2. Sanity Check ELF / FSELF] ──> [3. PRX Module Audit]
+                                                                                     │
+                                                                            [4. Baseline Run]
+                                                                                     │
+                        ┌────────────────────────────────────────────────────────────┴──────────────────────────┐
+                        ▼                                                                                       ▼
+              [Clean Boot / In-game]                                                                   [Failure / Freeze]
+                        │                                                                                       │
+                        │                                                                             [5. Triage Failure Mode]
+                        │                                                                                       │
+                        │                                                      ┌────────────────────────────────┼────────────────────────────────┐
+                        │                                                      ▼                                ▼                                ▼
+                        │                                             [Crash (0xC0000005)]              [Loop / Freeze]                 [Empty Canvas]
+                        │                                                      │                                │                                │
+                        │                                            [Check PRX & Archives]          [Thread Stack Walk]             [Engine Subsystem Bypass]
+                        │                                                      │                                │                                │
+                        └──────────────────────────────────────────────────────┴────────────────────────────────┴────────────────────────────────┘
+                                                                                       │
+                                                                       [6. Audio & Pipeline Cache Tuning]
+                                                                                       │
+                                                                       [7. Native GUI Packaging]
 ```
 
-### Step 1: Package Unpacking
-Extract the retail or decrypted PS4 `.pkg` using the CLI extractor:
-```cmd
-pkgextract_tool\pkgextract.exe "path\to\target_game.pkg" "output_folder"
-```
-Verify the contents:
-* `eboot.bin`: Main executable (must be decrypted ELF64).
-* `sce_module/`: Dynamic libraries (`.prx`).
-* Game archives (e.g., `.apf`, `.pak`, `.cpk`).
+### Step 1: Package Unpacking & Multi-Part Merging
+1. Unpack Base Game:
+   ```cmd
+   pkgextract_tool\pkgextract.exe -o "target_folder" "base_game.pkg"
+   ```
+2. For Updates/Patches: Unpack to a temporary folder, then copy/overlay all files over `target_folder` to preserve base archives.
 
 ### Step 2: ELF Binary Verification
-Check the first 4 bytes of `eboot.bin`:
-* Valid decrypted ELF: `7F 45 4C 46` (`\x7fELF`).
-* If header starts with `53 43 45` (`SCE`): The binary is encrypted with Sony SELF headers and must be decrypted on a jailbroken console or via decryption tools before execution.
+Read the first 4 bytes of `eboot.bin`:
+* `7F 45 4C 46` (`\x7fELF`): Standard decrypted ELF64.
+* `4F 15 3D 1D` (`0x1D3D154F`): PS4 Signed ELF / Fake SELF (FSELF). Supported natively by the runtime.
+* `53 43 45 00` (`SCE\0`): Encrypted retail SELF container; must be decrypted before execution.
 
-### Step 3: Baseline Execution
-Run the game through the translation runtime with logging enabled:
+### Step 3: Module Audit
+Ensure `target_folder\sce_module\` contains required dynamic libraries:
+* `libc.prx`
+* `libSceFios2.prx`
+
+### Step 4: Baseline Execution & Log Analysis
+Run game via runtime:
 ```cmd
-runtime\shadPS4.exe -g "output_folder\eboot.bin" -f false
+runtime\shadPS4.exe -g "target_folder\eboot.bin" -f false
 ```
+Inspect `%APPDATA%\shadps4\log\shadps4.log`.
 
-### Step 4: Failure Mode Diagnosis & Remediation
+### Step 5: Triage Failure Modes
+* **Failure Mode A: 0xC0000005 (Access Violation):** Missing loose archives or unhandled NID. Check log for missing `.pak` / `.prx`.
+* **Failure Mode B: Thread Deadlock:** Use `tools\dump_gamemain_stack.exe <PID>` to inspect RIP across all guest threads.
+* **Failure Mode C: Empty Canvas (Subsystem Abort):** Game boots to solid color with audio. Scan initialization disassembly for `0F 84` (JE) abort loops and apply NOP patching.
 
-#### Failure Mode A: Immediate Access Violation (`0xC0000005`)
-* **Cause:** Game called a Sony NID function that returned a `NULL` pointer or an unhandled struct.
-* **Remediation:** Inspect `shadps4.log`. Identify missing NIDs (11-character hash strings). Implement stubs returning `0` (SCE_OK) or allocating dummy structures.
+### Step 6: Audio & Shader Cache Tuning
+In `%APPDATA%\shadps4\config.json`:
+* `"audio_backend": 1` $\rightarrow$ OpenAL active 8ch $\rightarrow$ 2ch LFE folding.
+* `"pipeline_cache_enabled": true` $\rightarrow$ Persistent disk caching in `%APPDATA%\shadps4\cache\`.
+* `"pipeline_cache_archived": true` $\rightarrow$ Compressed pipeline archives.
+* `"vkvalidation_core_enabled": false` $\rightarrow$ Removes debug validation overhead.
 
-#### Failure Mode B: Infinite Hang / Thread Deadlock
-* **Cause:** Worker thread waiting for a semaphore, event flag, or network response that never fires.
-* **Remediation:** Attach `tools\dump_gamemain_stack.exe` to the running process PID:
-  1. Inspect the Instruction Pointer (`RIP`) of all guest threads.
-  2. Locate the function in disassembly.
-  3. Patch the polling loop (`TEST EAX, EAX; JZ wait`) to proceed immediately.
-
-#### Failure Mode C: Empty Colored Canvas / Black Screen with Audio (The Subsystem Abort)
-* **Cause:** Engine initialization sequence aborted due to optional console service checks.
-* **Remediation:**
-  1. Inspect the main thread stack during the freeze using `dump_gamemain_stack.exe`.
-  2. Disassemble the initialization function around the current call site.
-  3. Look for cascades of `0F 84` (JE) or `0F 85` (JNE) leading to a common teardown block.
-  4. Use or adapt `tools\patch_subsystem_jumps.cpp` to overwrite conditional failure jumps with `NOP` (`0x90`).
-
-### Step 5: Audio & Control Tuning
-* Open `%APPDATA%\shadps4\config.json`.
-* Set `"audio_backend": 1` (OpenAL) to ensure 7.1 $\rightarrow$ 2.0 LFE folding.
-* Connect any XInput, DualShock 4, or DualSense controller (shadPS4 maps SDL controllers to `ScePad` natively).
-
-### Step 6: Native GUI Packaging
-1. Open `templates/launcher.cpp`.
-2. Configure `kGameTitle` and relative paths.
-3. Compile using the included standalone toolchain:
+### Step 7: Native GUI Packaging
+1. Configure `kGameTitle`, relative runtime path, and relative eboot path in `templates/launcher.cpp`.
+2. Compile standalone `.exe` using portable toolchain:
    ```cmd
    tools\w64devkit\bin\g++.exe -O2 -mwindows templates\launcher.cpp -o "GameTitle.exe"
    ```
-4. Place `GameTitle.exe` alongside the game folder for clean one-click launching without terminal windows.
+3. Place `GameTitle.exe` in the root folder alongside `game\` and `runtime\`.
 
 ---
 
-## 4. Architecture of the Standalone Runner (`/src`)
+## 4. Tooling Reference Table
 
-The `/src` directory provides an independent native runner built from scratch without external runtime dependencies:
-
-```
-src/
-├── core/
-│   ├── elf.cpp / elf.h        # ELF64 parser, segment loader (VirtualAlloc RX/RW)
-│   ├── nid_table.h            # Comprehensive dictionary of Sony PS4 NID hashes to symbols
-│   └── resolver.cpp / .h      # Dynamic relocation processor (R_X86_64_JUMP_SLOT, GLOB_DAT)
-├── hle/
-│   ├── hle_kernel.cpp / .h    # Orbis kernel threading, mutexes, file I/O
-│   ├── hle_libc.cpp / .h      # Standard C library runtime mappings
-│   ├── hle_video.cpp / .h     # Windows Win32 window creation & GNM command intercepts
-│   ├── hle_pad.cpp / .h       # XInput to ScePad conversion
-│   └── hle_audio.cpp / .h     # FMOD Studio PRX interop stubs
-└── main.cpp                   # Host entry point and execution transfer to guest RIP
-```
-
-* **Compilation:** Can be built instantly on any Windows PC via `build.bat` using `tools/w64devkit/bin/g++.exe` or via `CMakeLists.txt`.
-
----
-
-## 5. Tooling Reference Table
-
-| Tool Path | Purpose | When to Use |
+| Tool Path | Scope | Purpose |
 | :--- | :--- | :--- |
-| `pkgextract_tool/pkgextract.exe` | PKG archive unpacker | Step 1 of any new game conversion. |
-| `tools/patch_subsystem_jumps.cpp` | Automated NOP patcher for fail jumps | When game aborts in initialization loops (canvas bug). |
-| `tools/dump_gamemain_stack.cpp` | Win32 stack-walk & register inspector | When game hangs, freezes, or hits deadlocks. |
-| `tools/read_live_globals.cpp` | Guest RAM pointer & state inspector | Verifying if renderer / game state pointers are valid. |
-| `tools/test_printwindow.cpp` | Framebuffer capture tool | Verifying rendering without needing window focus. |
-| `tools/w64devkit/` | Standalone portable C++ toolchain | Compiling tools, launchers, or `/src` anywhere. |
-| `templates/launcher.cpp` | C++ GUI launcher template | Final packaging step for a polished game release. |
+| `pkgextract_tool/pkgextract.exe` | Generic | Unpacks PS4 PKG archives to directories. |
+| `tools/dump_gamemain_stack.cpp` | Generic | Inspects guest thread RIP, RSP, and call return addresses live in RAM. |
+| `tools/test_printwindow.cpp` | Generic | Captures window framebuffer to `.bmp` without window focus. |
+| `tools/w64devkit/` | Generic | Portable standalone GCC/G++ C++20 compiler toolchain. |
+| `templates/launcher.cpp` | Generic | Clean Win32 GUI wrapper template for one-click launching. |
+| `tools/patch_subsystem_jumps.cpp` | Game-Specific (BBR2) | Overwrites 84 abort jumps in Vector Unit engine with NOP. |
+| `tools/read_live_globals.cpp` | Game-Specific (BBR2) | Inspects VuEngine global pointers in RAM. |
 
 ---
 
-## 6. Guidelines for Future AI Coding Assistants
+## 5. Guidelines for Future AI Coding Assistants
 
-When prompted to continue work on Project Orbis or convert a new game:
-1. **Never Assume a GPU Bug First:** If audio plays and a window is open but the screen is empty, check engine initialization jumps first before attempting to debug shader translations.
-2. **Preserve Clean Repositories:** Never commit game assets (`.apf`, `.pkg`, decrypted raw game files) or multi-hundred megabyte compiler binaries (`w64devkit`) to Git. Always respect `.gitignore`.
-3. **Use the Portable Toolchain:** The host system may not have GCC/Clang in `PATH`. Always invoke `tools\w64devkit\bin\g++.exe` directly when compiling C++ code.
-4. **Make Backups Before Patching:** Always maintain an untouched copy of `eboot.bin` (e.g. `eboot.bin.bak`) before modifying binary opcodes.
-5. **Always Verify 7.1 LFE Audio:** If a user reports weak sound effects, inspect the audio downmix settings before looking for game asset issues.
+1. **Be Honest About the Architecture:** Never claim game binaries are converted into standalone native Windows binaries without a translation layer. The runtime layer (`shadPS4`) handles GPU translation (GNM $\rightarrow$ Vulkan) and OS syscalls.
+2. **Game-Specific Patches are Not Universal:** `patch_subsystem_jumps.cpp` only applies to BBR2. Different engines (e.g. Beenox) have completely different memory layouts and failure modes.
+3. **Always Back Up `eboot.bin`:** Create `eboot.bin.bak` before making opcode modifications.
+4. **Never Commit Large Binaries or Game Data:** Respect `.gitignore`. Do not commit PKG files, game dumps, or extracted archives.
+5. **Always Enable Pipeline Caching:** To prevent user complaints about stuttering during initial gameplay, ensure `pipeline_cache_enabled` is set to `true`.
