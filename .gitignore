@@ -1,0 +1,39 @@
+# Compilers and Toolchains
+tools/w64devkit/
+
+# Runtimes & Third-Party Binaries
+runtime/*.exe
+*.zip
+*.tar.gz
+
+# Build outputs
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+build/
+bin/
+out/
+
+# Game packages & Extracted Assets (Keep repository legal & lightweight)
+*.pkg
+*.apf
+*.prx
+extracted_game/
+extracted_*/
+game/
+
+# Memory dumps and logs
+*.bin
+*.log
+*.tmp
+*.bak
+*.bmp
+
+# IDE & OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
